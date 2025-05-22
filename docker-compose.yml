@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "80:8080"
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - API_KEY=your-gemini-api-key
+      - OPENPROVIDER_USERNAME=openprovider-username
+      - OPENPROVIDER_PASSWORD=openprovider-password
+    volumes:
+      - app_logs:/app/logs
+
+volumes:
+  app_logs:
+

@@ -1,0 +1,707 @@
+// server.js
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
+
+// Load environment variables
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// API key configuration with logging
+const GEMINI_API_KEY = process.env.API_KEY;
+const GEMINI_TEXT_MODEL = 'gemini-pro';
+
+// Debug environment variables (don't log full credentials)
+console.log('Environment check:');
+console.log('API_KEY present:', !!GEMINI_API_KEY);
+console.log('OPENPROVIDER_USERNAME present:', !!process.env.OPENPROVIDER_USERNAME);
+console.log('OPENPROVIDER_PASSWORD present:', !!process.env.OPENPROVIDER_PASSWORD);
+
+// OpenProvider credentials
+const OPENPROVIDER_USERNAME = process.env.OPENPROVIDER_USERNAME;
+const OPENPROVIDER_PASSWORD = process.env.OPENPROVIDER_PASSWORD;
+const OPENPROVIDER_AUTH_URL = 'https://api.openprovider.eu/v1beta/auth/login';
+const OPENPROVIDER_CHECK_URL = 'https://api.openprovider.eu/v1beta/domains/check';
+
+// Store auth token with expiry
+let openProviderAuthToken = null;
+let tokenExpiryTime = null;
+
+// Configure Google Generative AI with fallback for testing
+let genAI;
+try {
+  genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  console.log('Gemini AI initialized successfully');
+} catch (err) {
+  console.error('Error initializing Gemini:', err.message);
+  // We'll handle fallbacks in the endpoints
+}
+
+// Helper to get OpenProvider auth token
+async function getOpenProviderToken() {
+  // Return existing token if still valid (expiry set to 1 hour)
+  const currentTime = new Date().getTime();
+  if (openProviderAuthToken && tokenExpiryTime && currentTime < tokenExpiryTime) {
+    return openProviderAuthToken;
+  }
+
+  try {
+    const response = await axios.post(OPENPROVIDER_AUTH_URL, {
+      username: OPENPROVIDER_USERNAME,
+      password: OPENPROVIDER_PASSWORD,
+      ip: "0.0.0.0" // Usually not required but included as per example
+    });
+
+    if (response.data && response.data.data && response.data.data.token) {
+      openProviderAuthToken = response.data.data.token;
+      // Set token expiry to 1 hour from now (in milliseconds)
+      tokenExpiryTime = new Date().getTime() + (60 * 60 * 1000);
+      return openProviderAuthToken;
+    } else {
+      throw new Error('Invalid response format from OpenProvider authentication');
+    }
+  } catch (error) {
+    console.error('Error authenticating with OpenProvider:', error.message);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+    }
+    throw new Error('Failed to authenticate with OpenProvider');
+  }
+}
+
+// MOCK DOMAIN SUGGESTIONS FUNCTION - used as fallback if Gemini API has issues
+function mockDomainSuggestions(description) {
+  console.log('Using mock domain suggestions for:', description);
+  
+  // Extract keywords
+  const words = description.toLowerCase().split(/\W+/).filter(word => 
+    word.length > 3 && !['with', 'that', 'this', 'from', 'have', 'about'].includes(word)
+  );
+  
+  // Create combinations of words
+  const domains = [];
+  const tlds = ['com', 'io', 'org', 'net', 'app'];
+  
+  // Use up to 3 keywords
+  const keywords = words.slice(0, Math.min(3, words.length));
+  
+  // Generate single keyword domains
+  keywords.forEach(word => {
+    domains.push(`${word}.com`);
+  });
+  
+  // Generate two word combinations
+  if (keywords.length >= 2) {
+    domains.push(`${keywords[0]}${keywords[1]}.com`);
+    domains.push(`${keywords[0]}-${keywords[1]}.org`);
+    domains.push(`my${keywords[0]}.io`);
+  }
+  
+  // Add some creative options
+  domains.push(`the${keywords[0] || 'project'}.com`);
+  domains.push(`${keywords[0] || 'awesome'}hub.com`);
+  
+  // Ensure we have at least 5 domains
+  while (domains.length < 5) {
+    const randomTld = tlds[Math.floor(Math.random() * tlds.length)];
+    domains.push(`${keywords[0] || 'my'}project.${randomTld}`);
+  }
+  
+  return domains.slice(0, 5);
+}
+
+// MOCK DOMAIN AVAILABILITY FUNCTION - used as fallback if OpenProvider API has issues
+function mockDomainAvailability(domains) {
+  console.log('Using mock domain availability for:', domains);
+  
+  return {
+    code: 0,
+    data: {
+      results: domains.map(domain => {
+        // Randomly determine if domain is available (80% chance)
+        const isAvailable = Math.random() < 0.8;
+        // Randomly determine if domain is premium (10% chance if available)
+        const isPremium = isAvailable && Math.random() < 0.1;
+        
+        // Generate a random price
+        const basePrice = isPremium ? 
+          Math.floor(Math.random() * 200) + 100 : // Premium $100-$300
+          Math.floor(Math.random() * 15) + 5;     // Regular $5-$20
+          
+        return {
+          domain: typeof domain === 'string' ? domain : `${domain.name}.${domain.extension}`,
+          status: isAvailable ? (isPremium ? 'premium' : 'free') : 'taken',
+          is_premium: isPremium,
+          price: {
+            product: {
+              currency: 'USD',
+              price: basePrice
+            }
+          },
+          premium: isPremium ? {
+            price: {
+              create: basePrice
+            }
+          } : undefined
+        };
+      })
+    }
+  };
+}
+
+// Add the language detection function to your server.js file
+function detectLanguage(text) {
+  // Common words/patterns by language
+  const languagePatterns = {
+    es: {
+      words: ['el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'y', 'o', 'que', 'en', 'de', 'con', 'para', 'por', 'su', 'al', 'del', 'mi', 'tu', 'se', 'te', 'esta', 'este', 'como', 'pero', 'sin', 'sobre', 'entre', 'cada', 'todo', 'otro', 'aunque', 'desde', 'hasta', 'durante', 'antes', 'despues', 'entonces', 'ahora', 'siempre', 'nunca', 'aqui', 'alli', 'cuando', 'adonde', 'porque', 'mientras', 'sino', 'tambien', 'muy', 'bien', 'mal', 'poco', 'mucho', 'nada', 'algo', 'solo', 'tanto'],
+      tld: 'es'
+    },
+    nl: {
+      words: ['de', 'het', 'een', 'in', 'is', 'dat', 'op', 'zijn', 'met', 'voor', 'en', 'van', 'niet', 'aan', 'hij', 'er', 'bij', 'ook', 'uit', 'nog', 'wel', 'geen', 'door', 'over', 'maar', 'tot', 'dan', 'wat', 'dit', 'deze', 'die', 'hoe', 'als', 'je', 'kan', 'waar', 'we', 'ja', 'nee', 'ik', 'jij', 'zij', 'wij', 'jullie', 'naar', 'onder', 'tussen', 'tegen', 'vanaf', 'zonder', 'toch', 'altijd', 'nooit'],
+      tld: 'nl'
+    },
+    fr: {
+      words: ['le', 'la', 'les', 'un', 'une', 'des', 'et', 'ou', 'que', 'qui', 'quoi', 'comment', 'où', 'quand', 'pourquoi', 'avec', 'sans', 'dans', 'sur', 'sous', 'pour', 'par', 'de', 'ce', 'cette', 'ces', 'mon', 'ton', 'son', 'notre', 'votre', 'leur', 'aussi', 'mais', 'donc', 'alors', 'car', 'comme', 'si', 'tout', 'tous', 'toute', 'toutes', 'rien', 'personne', 'autre', 'même', 'plus', 'moins', 'très', 'assez', 'beaucoup', 'peu', 'trop'],
+      tld: 'fr'
+    },
+    de: {
+      words: ['der', 'die', 'das', 'ein', 'eine', 'und', 'oder', 'aber', 'wenn', 'weil', 'für', 'mit', 'zu', 'zur', 'zum', 'auf', 'in', 'bei', 'von', 'nach', 'über', 'unter', 'vor', 'hinter', 'neben', 'zwischen', 'aus', 'durch', 'gegen', 'ohne', 'um', 'am', 'im', 'an', 'als', 'wie', 'wo', 'wann', 'warum', 'weshalb', 'wer', 'was', 'welche', 'welcher', 'welches', 'mein', 'dein', 'sein', 'ihr', 'unser', 'euer', 'nicht', 'kein', 'keine'],
+      tld: 'de'
+    },
+    it: {
+      words: ['il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'uno', 'una', 'e', 'o', 'ma', 'perché', 'che', 'chi', 'cosa', 'dove', 'quando', 'come', 'quale', 'quali', 'con', 'senza', 'per', 'tra', 'fra', 'sopra', 'sotto', 'dentro', 'fuori', 'davanti', 'dietro', 'prima', 'dopo', 'questo', 'quello', 'mio', 'tuo', 'suo', 'nostro', 'vostro', 'loro', 'tutto', 'tutti', 'ogni', 'altro', 'bene', 'male', 'molto', 'poco', 'troppo', 'tanto', 'niente', 'nulla'],
+      tld: 'it'
+    },
+    pt: {
+      words: ['o', 'a', 'os', 'as', 'um', 'uma', 'uns', 'umas', 'e', 'ou', 'mas', 'porque', 'que', 'quem', 'qual', 'quando', 'onde', 'como', 'para', 'por', 'com', 'sem', 'em', 'sobre', 'sob', 'entre', 'antes', 'depois', 'durante', 'desde', 'até', 'este', 'esta', 'isto', 'esse', 'essa', 'isso', 'aquele', 'aquela', 'aquilo', 'meu', 'teu', 'seu', 'nosso', 'vosso', 'todo', 'todos', 'nenhum', 'muito', 'pouco', 'mais', 'menos', 'tão', 'tanto'],
+      tld: 'pt'
+    }
+  };
+
+  // Default to English if language detection fails
+  let detectedLanguage = 'en';
+  let highestScore = 0;
+
+  try {
+    // Count words by language
+    const words = text.toLowerCase().split(/\W+/);
+    const languageScores = {};
+
+    // Initialize scores for each language
+    Object.keys(languagePatterns).forEach(lang => {
+      languageScores[lang] = 0;
+    });
+
+    // Calculate score for each language
+    words.forEach(word => {
+      Object.keys(languagePatterns).forEach(lang => {
+        if (languagePatterns[lang].words.includes(word)) {
+          languageScores[lang]++;
+        }
+      });
+    });
+
+    // Find language with highest score
+    Object.keys(languageScores).forEach(lang => {
+      if (languageScores[lang] > highestScore) {
+        highestScore = languageScores[lang];
+        detectedLanguage = lang;
+      }
+    });
+
+    // If no significant matches found (score lower than 2), default to English
+    if (highestScore < 2) {
+      return { language: 'en', tld: 'com' };
+    }
+
+    return { 
+      language: detectedLanguage, 
+      tld: languagePatterns[detectedLanguage]?.tld || 'com' 
+    };
+  } catch (error) {
+    console.error("Error in language detection:", error);
+    return { language: 'en', tld: 'com' };
+  }
+}
+
+// Optimized AI domain suggestions endpoint with availability filtering and TLD prioritization
+app.post('/api/ai-domain-suggestions', async (req, res) => {
+  try {
+    console.log('Received domain suggestion request:', req.body);
+    const { description } = req.body;
+    
+    if (!description || description.trim() === '') {
+      return res.status(400).json({ error: 'Description is required' });
+    }
+
+    // Enhanced language detection
+    let primaryTld = 'com';
+    let detectedLang = 'en';
+    try {
+      const languagePatterns = {
+        es: {
+          words: ['el', 'la', 'los', 'las', 'un', 'una', 'y', 'que', 'de', 'en', 'para', 'por', 'con', 'su', 'como', 'este', 'esta', 'estos', 'estas', 'mi', 'tu', 'ser', 'tener', 'hacer', 'estar'],
+          tld: 'es'
+        },
+        nl: {
+          words: ['de', 'het', 'een', 'en', 'van', 'voor', 'met', 'op', 'in', 'aan', 'bij', 'door', 'over', 'onder', 'naar', 'uit', 'te', 'om', 'zijn', 'hebben', 'worden', 'gaan', 'komen', 'zien', 'kunnen'],
+          tld: 'nl'
+        },
+        fr: {
+          words: ['le', 'la', 'les', 'un', 'une', 'des', 'et', 'ou', 'que', 'qui', 'quoi', 'dans', 'sur', 'pour', 'par', 'avec', 'sans', 'en', 'à', 'au', 'aux', 'ce', 'cette', 'ces', 'mon', 'ton', 'son'],
+          tld: 'fr'
+        },
+        de: {
+          words: ['der', 'die', 'das', 'ein', 'eine', 'und', 'oder', 'aber', 'für', 'mit', 'zu', 'in', 'aus', 'auf', 'bei', 'nach', 'von', 'vor', 'durch', 'über', 'unter', 'neben', 'zwischen', 'weil', 'wenn', 'dass'],
+          tld: 'de'
+        },
+        it: {
+          words: ['il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'una', 'e', 'o', 'ma', 'che', 'chi', 'per', 'con', 'su', 'in', 'da', 'di', 'a', 'al', 'dal', 'del', 'nel', 'mio', 'tuo', 'suo'],
+          tld: 'it'
+        }
+      };
+      
+      const tldMap = { es: 'es', nl: 'nl', fr: 'fr', de: 'de', it: 'it', en: 'com' };
+      const words = description.toLowerCase().split(/\W+/);
+      
+      let highestScore = 0;
+      
+      Object.keys(languagePatterns).forEach(lang => {
+        const langWords = languagePatterns[lang].words;
+        const score = words.filter(w => langWords.includes(w)).length;
+        if (score > highestScore) {
+          highestScore = score;
+          detectedLang = lang;
+          primaryTld = languagePatterns[lang].tld;
+        }
+      });
+      
+      console.log(`Detected language: ${detectedLang}, primary TLD: .${primaryTld}`);
+    } catch (error) {
+      console.error('Error in language detection, using default .com:', error);
+    }
+    
+    // Generate domains using Gemini API
+    if (!genAI) {
+      return res.status(500).json({ error: 'Gemini AI not initialized' });
+    }
+    
+    console.log('Sending query to Gemini with language-aware prompt...');
+    
+    // Use the correct model name
+    const MODEL_NAME = 'gemini-2.0-flash'; // Using updated model name
+    
+    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+    
+    // Language-specific and availability-focused prompt
+    const prompt = `
+    You are a domain name generation expert. Generate 15 creative, memorable domain names for: "${description}"
+
+    I've detected that this query is in ${detectedLang.toUpperCase()} language. Based on this:
+    
+    CRITICAL REQUIREMENTS:
+    1. At least 5 domain names MUST use the .${primaryTld} TLD since this is for a ${detectedLang.toUpperCase()}-speaking audience
+    2. The first several results MUST use the .${primaryTld} TLD
+    3. Include some additional domains with other TLDs like .com, .io, .net, .org for variety
+    4. Create truly unique, brandable domain names that would be available for registration
+    5. Focus on domains that are likely to be available - avoid common words or obvious combinations
+    6. DO NOT just repeat the words from the description as domains
+    
+    RESPOND WITH ONLY a JSON array of domain strings. Example:
+    ["creativename.${primaryTld}", "brandable.${primaryTld}", "unique.${primaryTld}", "different.${primaryTld}", "catchy.${primaryTld}", "global.com", "international.io", "worldwide.net"]
+    `;
+
+    try {
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 1.0,
+          maxOutputTokens: 800
+        }
+      });
+
+      const response = result.response;
+      const responseText = response.text();
+      console.log('Gemini raw response:', responseText);
+      
+      // Try to parse JSON array from the response
+      let candidateDomains = [];
+      const jsonMatch = responseText.match(/\[.*\]/s);
+      
+      if (jsonMatch) {
+        candidateDomains = JSON.parse(jsonMatch[0]);
+      } else {
+        // If no valid JSON array found, extract domain-like strings
+        const domainPattern = /[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}/g;
+        const matches = responseText.match(domainPattern);
+        if (matches && matches.length > 0) {
+          candidateDomains = matches;
+        } else {
+          return res.status(500).json({ 
+            error: 'Failed to parse domain suggestions from AI response',
+            raw: responseText
+          });
+        }
+      }
+      
+      // Ensure we have valid domains
+      candidateDomains = candidateDomains.filter(domain => 
+        typeof domain === 'string' && 
+        domain.match(/^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$/)
+      );
+      
+      if (candidateDomains.length === 0) {
+        return res.status(500).json({ 
+          error: 'No valid domain suggestions generated',
+          raw: responseText
+        });
+      }
+      
+      // Split domains by TLD for proper prioritization
+      const primaryTldDomains = candidateDomains.filter(d => d.endsWith(`.${primaryTld}`));
+      const otherDomains = candidateDomains.filter(d => !d.endsWith(`.${primaryTld}`));
+      
+      // Reorder to ensure primary TLD domains come first
+      candidateDomains = [...primaryTldDomains, ...otherDomains];
+      
+      console.log(`Generated ${candidateDomains.length} candidate domains`);
+      
+      // Check domain availability
+      try {
+        // Convert domains to the format needed for the availability check
+        const domainsToCheck = candidateDomains.map(domain => {
+          const parts = domain.split('.');
+          return {
+            name: parts[0],
+            extension: parts.slice(1).join('.')
+          };
+        });
+        
+        console.log('Checking domain availability...');
+        const availabilityResults = await openProviderService.checkDomainAvailability(domainsToCheck);
+        
+        if (availabilityResults && availabilityResults.data && availabilityResults.data.results) {
+          // Filter only for available domains
+          const availableDomains = availabilityResults.data.results
+            .filter(result => result.status === 'free' || result.status === 'premium')
+            .map(result => result.domain || `${result.name}.${result.extension}`);
+          
+          console.log(`Found ${availableDomains.length} available domains`);
+          
+          if (availableDomains.length > 0) {
+            // Split available domains by TLD for prioritization
+            const availablePrimaryTldDomains = availableDomains.filter(d => d.endsWith(`.${primaryTld}`));
+            const availableOtherDomains = availableDomains.filter(d => !d.endsWith(`.${primaryTld}`));
+            
+            // Reorder to ensure primary TLD domains come first
+            const prioritizedAvailableDomains = [...availablePrimaryTldDomains, ...availableOtherDomains];
+            
+            // Return only up to 7 available domains
+            const finalDomains = prioritizedAvailableDomains.slice(0, 7);
+            console.log('Returning available domains with TLD prioritization:', finalDomains);
+            return res.json(finalDomains);
+          }
+        }
+        
+        // If we don't have any available domains, or availability check fails, return all candidates
+        // This is a fallback option
+        console.log('No available domains found or availability check failed. Returning all candidate domains.');
+        return res.json(candidateDomains.slice(0, 7));
+      } catch (availabilityError) {
+        console.error('Error checking availability:', availabilityError);
+        // If availability check fails, return candidate domains
+        return res.json(candidateDomains.slice(0, 7));
+      }
+    } catch (aiError) {
+      console.error('Error generating domains with Gemini:', aiError);
+      return res.status(500).json({ 
+        error: 'Failed to generate domain suggestions',
+        message: aiError.message
+      });
+    }
+  } catch (error) {
+    console.error('Error in AI domain suggestions endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to generate domain suggestions', 
+      message: error.message
+    });
+  }
+});
+
+// Simple language detection function for TLD prioritization
+function detectLanguage(text) {
+  // Common words/patterns by language
+  const languagePatterns = {
+    es: {
+      words: ['el', 'la', 'los', 'las', 'un', 'una', 'y', 'o', 'que', 'en', 'de', 'con', 'para', 'por', 'su', 'como', 'pero', 'sin'],
+      tld: 'es'
+    },
+    nl: {
+      words: ['de', 'het', 'een', 'in', 'is', 'dat', 'op', 'met', 'voor', 'en', 'van', 'niet', 'ook', 'maar'],
+      tld: 'nl'
+    },
+    fr: {
+      words: ['le', 'la', 'les', 'un', 'une', 'des', 'et', 'ou', 'que', 'qui', 'dans', 'sur', 'pour', 'par', 'avec'],
+      tld: 'fr'
+    },
+    de: {
+      words: ['der', 'die', 'das', 'ein', 'eine', 'und', 'oder', 'aber', 'für', 'mit', 'zu', 'in', 'bei', 'von', 'nach'],
+      tld: 'de'
+    },
+    it: {
+      words: ['il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'una', 'e', 'o', 'ma', 'che', 'per', 'con', 'su'],
+      tld: 'it'
+    }
+  };
+
+  // Default to English if language detection fails
+  let detectedLanguage = 'en';
+  let highestScore = 0;
+
+  try {
+    // Count words by language
+    const words = text.toLowerCase().split(/\W+/);
+    const languageScores = {};
+
+    // Initialize scores for each language
+    Object.keys(languagePatterns).forEach(lang => {
+      languageScores[lang] = 0;
+    });
+
+    // Calculate score for each language
+    words.forEach(word => {
+      Object.keys(languagePatterns).forEach(lang => {
+        if (languagePatterns[lang].words.includes(word)) {
+          languageScores[lang]++;
+        }
+      });
+    });
+
+    // Find language with highest score
+    Object.keys(languageScores).forEach(lang => {
+      if (languageScores[lang] > highestScore) {
+        highestScore = languageScores[lang];
+        detectedLanguage = lang;
+      }
+    });
+
+    // If no significant matches found (score lower than 2), default to English
+    if (highestScore < 2) {
+      return { language: 'en', tld: 'com' };
+    }
+
+    return { 
+      language: detectedLanguage, 
+      tld: languagePatterns[detectedLanguage]?.tld || 'com' 
+    };
+  } catch (error) {
+    console.error("Error in language detection:", error);
+    return { language: 'en', tld: 'com' };
+  }
+}
+
+// Simple fallback domain generation
+function generateSimpleDomains(description, primaryTld) {
+  const words = description.toLowerCase()
+    .split(/\W+/)
+    .filter(word => word.length > 3)
+    .slice(0, 5);
+  
+  // If no usable words, use generic ones
+  if (words.length === 0) {
+    words.push('domain', 'website', 'online', 'digital', 'web');
+  }
+  
+  const domains = [];
+  const tlds = [primaryTld, 'com', 'io', 'net', 'org', 'app', 'co'];
+  
+  // Simple direct domains
+  words.forEach((word, i) => {
+    if (word.length > 3) {
+      domains.push(`${word}.${tlds[i % tlds.length]}`);
+    }
+  });
+  
+  // Combinations
+  if (words.length >= 2) {
+    for (let i = 0; i < words.length - 1; i++) {
+      for (let j = i + 1; j < words.length; j++) {
+        domains.push(`${words[i]}${words[j]}.${tlds[(i + j) % tlds.length]}`);
+        domains.push(`${words[i]}-${words[j]}.${tlds[(i + j + 1) % tlds.length]}`);
+      }
+    }
+  }
+  
+  // Add some prefixes/suffixes
+  const prefixes = ['my', 'the', 'best', 'pro', 'top'];
+  const suffixes = ['hub', 'pro', 'now', 'web', 'online'];
+  
+  for (let i = 0; i < Math.min(words.length, 3); i++) {
+    const prefix = prefixes[i % prefixes.length];
+    const suffix = suffixes[i % suffixes.length];
+    
+    domains.push(`${prefix}${words[i]}.${tlds[i % tlds.length]}`);
+    domains.push(`${words[i]}${suffix}.${tlds[(i + 2) % tlds.length]}`);
+  }
+  
+  return [...new Set(domains)];
+}
+
+// Endpoint for checking domain availability
+app.post('/api/check-domain-availability', async (req, res) => {
+  try {
+    console.log('Received domain availability request:', req.body);
+    const { domains } = req.body;
+    
+    if (!domains || !Array.isArray(domains) || domains.length === 0) {
+      return res.status(400).json({ error: 'Valid domains array is required' });
+    }
+    
+    let availabilityData;
+    
+    // Try using OpenProvider API, fall back to mock data if there's an issue
+    try {
+      // Get OpenProvider auth token
+      const token = await getOpenProviderToken();
+      
+      // Check domain availability
+      const response = await axios.post(OPENPROVIDER_CHECK_URL, 
+        {
+          domains: domains,
+          with_price: true
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      availabilityData = response.data;
+    } catch (apiError) {
+      console.error('Error using OpenProvider API, falling back to mock data:', apiError.message);
+      availabilityData = mockDomainAvailability(domains);
+    }
+    
+    console.log('Returning availability data:', JSON.stringify(availabilityData).substring(0, 200) + '...');
+    
+    // Forward the OpenProvider response directly
+    res.json(availabilityData);
+  } catch (error) {
+    console.error('Error in domain availability endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to check domain availability', 
+      message: error.message,
+      stack: process.env.NODE_ENV === 'production' ? undefined : error.stack
+    });
+  }
+});
+
+// API health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'AI Domain Generator API is running',
+    environment: {
+      nodeEnv: process.env.NODE_ENV,
+      geminiAvailable: !!genAI,
+      openProviderConfigured: !!(OPENPROVIDER_USERNAME && OPENPROVIDER_PASSWORD)
+    }
+  });
+});
+
+// Define all possible dist locations
+const possibleDistPaths = [
+  path.join(__dirname, '../dist'),           // Regular path (relative to backend)
+  path.join(__dirname, 'dist'),              // In case dist is in the backend directory
+  path.join(process.cwd(), 'dist'),          // In case server.js is run from project root
+  path.join(__dirname, '../../dist'),        // Another possible relative path
+  '/app/dist'                                // Docker container path (based on your Dockerfile)
+];
+
+// Find the first valid dist path
+let distPath = null;
+for (const possiblePath of possibleDistPaths) {
+  console.log(`Checking for dist directory at: ${possiblePath}`);
+  if (fs.existsSync(possiblePath) && fs.existsSync(path.join(possiblePath, 'index.html'))) {
+    distPath = possiblePath;
+    console.log(`Found valid dist directory at: ${distPath}`);
+    break;
+  }
+}
+
+// Serve static files from the found 'dist' directory
+if (distPath) {
+  console.log(`Serving static files from: ${distPath}`);
+  app.use(express.static(distPath));
+  
+  // For any request that doesn't match an API route or static file, serve the index.html
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+} else {
+  console.error('ERROR: Could not find a valid dist directory with index.html');
+  
+  // Fallback if the frontend build isn't available
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api/')) {
+      return next(); // Skip for API routes
+    }
+    
+    res.send(`
+      <html>
+        <head>
+          <title>AI Domain Generator</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+            .message { max-width: 600px; margin: 0 auto; }
+            .error { color: red; }
+            .button { display: inline-block; margin-top: 20px; padding: 10px 20px; 
+                     background-color: #dc2626; color: white; text-decoration: none; 
+                     border-radius: 5px; }
+            .code { background: #f1f1f1; padding: 10px; border-radius: 5px; margin: 10px 0; text-align: left; }
+          </style>
+        </head>
+        <body>
+          <h1>AI Domain Generator</h1>
+          <div class="message">
+            <p>The frontend application is not available.</p>
+            <p>The API is running and can be accessed at <code>/api/health</code>.</p>
+            <div class="error">
+              <p>Note: The frontend build files were not found in the 'dist' directory.</p>
+              <p>Checked the following locations:</p>
+              <div class="code">
+                ${possibleDistPaths.map(p => `- ${p}`).join('<br>')}
+              </div>
+            </div>
+            <a class="button" href="/api/health">Check API Health</a>
+          </div>
+        </body>
+      </html>
+    `);
+  });
+}
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`API available at: http://localhost:${PORT}/api/health`);
+  console.log(`Frontend available at: http://localhost:${PORT}/`);
+  if (distPath) {
+    console.log(`Using frontend files from: ${distPath}`);
+  } else {
+    console.log('WARNING: No frontend files found!');
+  }
+});
