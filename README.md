@@ -1,8 +1,10 @@
 # AI Domain Generator
 
-AI Domain Generator is a web application that helps users find available domain names based on their business or project description. It uses Google's Gemini AI to generate creative, relevant domain suggestions and checks their availability in real-time.
+AI Domain Search is a web application that helps users find available domain names based on their business or project description. It uses Google's Gemini AI to generate creative, relevant domain suggestions and checks their availability in real-time.
 
-![AI Domain Generator Screenshot](screenshot.png)
+| Dutch Language Query | Spanish Language Query |
+|:---------------------:|:----------------------:|
+| ![AI Domain Search Screenshot - Dutch](/ai-domain-nl.jpeg) | ![AI Domain Search Screenshot - Spanish](/ai-domain-es.jpeg) |
 
 ## Features
 
@@ -10,7 +12,7 @@ AI Domain Generator is a web application that helps users find available domain 
 - **Language Detection**: Identifies the language of your query and prioritizes appropriate country TLDs
 - **Real-time Availability Check**: Verifies if domains are available for registration
 - **Multi-language Support**: Works with English, Spanish, Dutch, French, German, Italian, and more
-- **Pricing Information**: Shows pricing and discount information for available domains
+- **Pricing Information**: Shows pricing and discount information for available domains (cost price it's returned by your Reseller ID Pricing)
 
 ## Tech Stack
 
@@ -23,7 +25,7 @@ AI Domain Generator is a web application that helps users find available domain 
 ## Project Structure
 
 ```
-ai-domain-generator/
+ai-domain-search/
 ├── src/                  # Frontend source code
 │   ├── components/       # React components
 │   ├── services/         # API service layers
@@ -51,8 +53,8 @@ ai-domain-generator/
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/ai-domain-generator.git
-   cd ai-domain-generator
+   git clone https://github.com/hichamdotpage/ai-domain-search.git
+   cd ai-domain-search
    ```
 
 2. Install dependencies:
