@@ -103,11 +103,6 @@ ai-domain-search/
 
 2. The built files will be in the `dist` directory
    
-3. For deployment, you can use the provided `deploy.sh` script:
-   ```bash
-   ./deploy.sh
-   ```
-
 ## How It Works
 
 1. **User Input**: Users enter a description of their business or project
